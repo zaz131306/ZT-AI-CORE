@@ -8,25 +8,6 @@ Enterprise-фреймворк изолированного когнитивно�
 Нормативная база 	ISO/IEC 27001, ISO/IEC 42001, гражданские профили криптографии
 Лицензия 	Apache License 2.0
 
-my-secure-platform/
-├── README.md
-├── LICENSE                          # Apache 2.0
-├── docs/                            # 00–09: ТЗ, threat model, чек-лист, runbook, слои,
-│                                    # домены, FSM-матрица, крипто-профиль, WORM, песочница, HAL
-├── submodules/
-│   ├── t8-sandbox/                  # L5: bwrap, SECCOMP (custom BPF), eBPF, gRPC-client (UDS)
-│   ├── fsm-engine/                  # L6 (Rust): states, transitions, WAL, Pending Rollback Counter
-│   ├── worm-audit/                  # L7 (Rust): BLAKE3-chain, Ed25519 checkpoints, anti-truncation
-│   ├── hal-common/                  # L2–L3 (Rust): crypto, thermal, power, platform, TPM
-│   ├── llm-gateway/                 # L4 (Python): mTLS-прокси, Egress DLP, rate-limit, circuit breaker
-│   └── rag-core/                    # L8 (Python): ingestion, KB, retriever, llm-client, каскадный валидатор
-├── api/proto/                       # Контракты gRPC: sandbox.proto, fsm.proto, audit.proto, rag.proto
-├── scripts/                         # build-sec-profile, build-sandbox, run-self-test, gen-keys, deploy
-├── tests/fuzz/                      # Fuzzing IPC/gRPC-контрактов (этап 7 ТЗ)
-├── docker-compose.yml               # llm-gateway, rag-core, worm-audit, fsm-engine
-├── Makefile                         # build | test | fuzz | sec-scan | docker-run | clean
-└── .github/workflows/               # ci.yml, security-scan.yml
-
 
 
 # 1. Развернуть репозиторий из единого генератора (если начинаете с init_repo.sh):
