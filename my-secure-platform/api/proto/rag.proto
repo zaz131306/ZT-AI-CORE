@@ -1,0 +1,224 @@
+// ============================================================================
+// ZT-AI-CORE v2.4 — контракт RAG-ядра (L8/D8)
+// Ingestion (F-A), Knowledge Base (F-B), Retriever (F-B/C), каскадный
+// валидатор ответов (F-D-03), изоляция системного промпта (F-C-05).
+// Транспорт в контуре D8: только AF_UNIX (/run/zt-core/rag.sock, F-E-04).
+// ============================================================================
+syntax = "proto3";
+
+package zt.rag.v2;
+
+option go_package = "github.com/zt-ai-core/api/gen/go/rag/v2;ragv2";
+
+// ----------------------------------------------------------------------------
+// Перечисления
+// ----------------------------------------------------------------------------
+
+// Уровни каскадного валидатора (F-D-03, по возрастанию стоимости).
+enum ValidatorStage {
+  VALIDATOR_STAGE_UNSPECIFIED = 0;
+  VALIDATOR_STAGE_RULE_BASED = 1;        // ~0.1 мс: regex/словари (fail fast)
+  VALIDATOR_STAGE_EMBEDDING_SIMILARITY = 2; // ~5–20 мс: cos_sim 0.85/0.60
+  VALIDATOR_STAGE_NLI = 3;               // ~50–200 мс: DeBERTa-v3-base-mnli (пограничные)
+  VALIDATOR_STAGE_FALLBACK = 4;          // «Информации в базе знаний недостаточно»
+}
+
+enum VerdictCode {
+  VERDICT_CODE_UNSPECIFIED = 0;
+  VERDICT_CODE_ACCEPTED = 1;             // ответ принят
+  VERDICT_CODE_BLOCKED_PII = 2;          // rule-based: PII в ответе
+  VERDICT_CODE_BLOCKED_SECRET = 3;       // rule-based: ключи/секреты
+  VERDICT_CODE_BLOCKED_PHRASE = 4;       // rule-based: запрещённые фразы
+  VERDICT_CODE_LOW_SIMILARITY = 5;       // cos_sim < 0.60 -> немедленный fallback
+  VERDICT_CODE_NLI_CONTRADICTION = 6;    // NLI: противоречие контексту
+  VERDICT_CODE_NLI_NOT_ENTAILED = 7;     // NLI: не следует из контекста
+  VERDICT_CODE_INSUFFICIENT_CONTEXT = 8; // fallback (AC-06)
+  VERDICT_CODE_EMPTY_RETRIEVAL = 9;      // retrieval не дал чанков -> fallback
+}
+
+enum DocumentStatus {
+  DOCUMENT_STATUS_UNSPECIFIED = 0;
+  DOCUMENT_STATUS_ACCEPTED = 1;
+  DOCUMENT_STATUS_DUPLICATE = 2;         // дедупликация по крипто-хэшу (F-A-04)
+  DOCUMENT_STATUS_BAD_SIGNATURE = 3;     // источник не подписан/подпись невалидна
+  DOCUMENT_STATUS_PARSE_ERROR = 4;
+  DOCUMENT_STATUS_REJECTED_POISON = 5;   // санкитайзер: признаки инъекции (F: Prompt Injection)
+}
+
+// ----------------------------------------------------------------------------
+// Ingestion (F-A-01…F-A-06)
+// ----------------------------------------------------------------------------
+
+message Document {
+  string doc_id = 1;
+  string source_uri = 2;                 // происхождение (подпись источника — anti-poisoning)
+  bytes source_signature = 3;            // Ed25519-подпись источника
+  bytes signer_public_key = 4;
+  string mime_type = 5;                  // text/plain, text/html, text/markdown, application/pdf
+  bytes content = 6;
+  map<string, string> metadata = 7;
+}
+
+// Политика чанкинга (F-A-03: 300–800 токенов, перекрытие 10–15%).
+message IngestPolicy {
+  uint32 chunk_min_tokens = 1;           // default 300
+  uint32 chunk_max_tokens = 2;           // default 512 (предел 800)
+  double overlap_ratio = 3;              // default 0.125 (10–15%)
+  bool dedup_by_hash = 4;                // default true (F-A-04)
+  bool sanitize = 5;                     // default true: main-content only + анти-инъекции
+  bool require_source_signature = 6;     // default true (anti Data Poisoning)
+}
+
+message IngestRequest {
+  repeated Document documents = 1;
+  IngestPolicy policy = 2;
+  bytes operator_nonce = 3;
+}
+
+message IngestedDocReport {
+  string doc_id = 1;
+  DocumentStatus status = 2;
+  bytes content_hash = 3;                // BLAKE3 очищенного main content
+  uint32 chunks_created = 4;
+  string detail = 5;
+}
+
+message IngestResponse {
+  uint32 accepted = 1;
+  uint32 duplicates = 2;
+  uint32 rejected = 3;
+  repeated IngestedDocReport reports = 4;
+  uint64 audit_seq = 5;                  // запись в WORM (NF-09)
+}
+
+// ----------------------------------------------------------------------------
+// Knowledge Base / Retriever (F-B-01…F-B-05)
+// ----------------------------------------------------------------------------
+
+message Chunk {
+  string chunk_id = 1;
+  string doc_id = 2;
+  uint32 ordinal = 3;
+  string text = 4;
+  bytes content_hash = 5;                // BLAKE3 чанка (дедупликация/целостность)
+  uint32 token_count = 6;
+  uint32 overlap_tokens_prev = 7;        // фактическое перекрытие с предыдущим чанком
+}
+
+message ScoredChunk {
+  Chunk chunk = 1;
+  double vector_score = 2;               // косинусная близость эмбеддингов
+  double bm25_score = 3;                 // лексический скоринг
+  double rrf_score = 4;                  // Reciprocal Rank Fusion (гибрид)
+  double rerank_score = 5;               // Cross-Encoder (если доступен)
+  uint32 final_rank = 6;
+}
+
+message RetrieveRequest {
+  string query_id = 1;
+  string question = 2;
+  uint32 top_k = 3;                      // MUST <= ZT_RAG_TOP_K_MAX (anti Model Extraction)
+  double min_score = 4;                  // порог отсева нерелевантного
+  bytes client_nonce = 5;
+}
+
+message RetrievedContext {
+  repeated ScoredChunk chunks = 1;
+  double retrieval_latency_ms = 2;       // NF-01: поиск + rerank <= 1.5 с
+  string embedder_id = 3;                // bge-m3 | e5-small | hashing(dev)
+  bool reranker_applied = 4;
+}
+
+// ----------------------------------------------------------------------------
+// Ответ RAG и каскадная валидация (F-C-05, F-D-03)
+// ----------------------------------------------------------------------------
+
+message QueryRequest {
+  string query_id = 1;
+  string question = 2;
+  uint32 top_k = 3;
+  bytes client_nonce = 4;
+  string route = 5;                      // "local" (Qwen 2.5) | "gateway" (L4)
+}
+
+message ValidatorTrace {
+  ValidatorStage decided_by = 1;
+  VerdictCode code = 2;
+  double rule_ms = 3;                    // ~0.1 мс
+  double embed_ms = 4;                   // ~5–20 мс
+  double nli_ms = 5;                     // ~50–200 мс, 0 если пропущен
+  double cos_sim = 6;                    // косинус ответ↔контекст
+  double nli_entailment = 7;             // P(entailment) NLI-модели
+  repeated string rule_hits = 8;         // какие правила/паттерны сработали
+  bool nli_skipped = 9;                  // cos_sim > 0.85 -> шаг 3 пропускается
+}
+
+message RagAnswer {
+  string query_id = 1;
+  string answer = 2;                     // при fallback — строго «Информации в базе знаний недостаточно»
+  ValidatorTrace validation = 3;
+  bytes answer_hash = 4;                 // BLAKE3 ответа (пишется в WORM, F-D-03 п.4)
+  uint64 audit_seq = 5;                  // seq записи вердикта в WORM
+  RetrievedContext context = 6;          // использованные чанки (для форензики)
+  bool is_fallback = 7;                  // true — ответ сгенерирован fallback-политикой
+  string model_id = 8;                   // qwen2.5-14b-local | external-via-gateway
+  double total_latency_ms = 9;           // NF-02: <= 15 с (Qwen 14B, Jetson)
+}
+
+message ValidateAnswerRequest {
+  string answer = 1;
+  RetrievedContext context = 2;          // контекст, против которого валидируем
+  string question = 3;
+}
+
+message ValidateAnswerResponse {
+  ValidatorTrace trace = 1;
+  bytes answer_hash = 2;
+  uint64 audit_seq = 3;                  // результат валидации логируется в WORM
+}
+
+// ----------------------------------------------------------------------------
+// Служебные
+// ----------------------------------------------------------------------------
+
+message HealthRequest {}
+
+message HealthResponse {
+  bool healthy = 1;
+  string lifecycle_state = 2;            // зеркало FSM (RUNNING/DEGRADED/...)
+  string operating_mode = 3;
+  uint64 kb_documents = 4;
+  uint64 kb_chunks = 5;
+  string embedder_id = 6;
+  bool models_warmed_up = 7;             // F-E-07: warm-up выполнен до SECCOMP
+  bool seccomp_armed = 8;                // F-E-02: фильтр применён
+  double uptime_secs = 9;
+}
+
+message KbStatsRequest {}
+
+message KbStatsResponse {
+  uint64 documents = 1;
+  uint64 chunks = 2;
+  uint64 vectors = 3;
+  bytes index_signature = 4;             // Ed25519-подпись индекса (anti Tampering)
+  uint64 dedup_skipped = 5;
+  double avg_chunk_tokens = 6;
+}
+
+// ----------------------------------------------------------------------------
+// Сервис RAG-ядра (D8; доступен только через /run/zt-core/rag.sock)
+// ----------------------------------------------------------------------------
+service RagService {
+  // Ingestion: парсинг, очистка, чанкинг, дедупликация (F-A).
+  rpc Ingest(IngestRequest) returns (IngestResponse);
+  // Retrieval: гибрид vector+BM25 + reranking (F-B), без генерации.
+  rpc Retrieve(RetrieveRequest) returns (RetrievedContext);
+  // Полный цикл: retrieve -> изолированный промпт -> LLM -> каскадный валидатор (F-C/F-D).
+  rpc Query(QueryRequest) returns (RagAnswer);
+  // Отдельный вызов каскадного валидатора (F-D-03).
+  rpc ValidateAnswer(ValidateAnswerRequest) returns (ValidateAnswerResponse);
+  // Служебные.
+  rpc Health(HealthRequest) returns (HealthResponse);
+  rpc GetKbStats(KbStatsRequest) returns (KbStatsResponse);
+}

@@ -1,0 +1,27 @@
+[package]
+name = "zt-worm-audit"
+version = "2.4.0"
+edition = "2021"
+rust-version = "1.75"
+description = "ZT-AI-CORE L7: WORM-аудит — BLAKE3 hash-chain, Ed25519-чекпоинты, anti-replay (nonce+TTL), dual-anchor anti-truncation (TPM NV + S3)"
+license = "Apache-2.0"
+
+[dependencies]
+blake3 = "1"
+ed25519-dalek = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+libc = "0.2"
+zt-hal-common = { path = "../hal-common", version = "2.4.0" }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lib]
+name = "zt_worm_audit"
+path = "src/lib.rs"
+
+[[bin]]
+name = "zt-worm-audit"
+path = "src/main.rs"

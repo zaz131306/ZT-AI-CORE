@@ -1,0 +1,3 @@
+# Runtime: stdlib-only. Опционально:
+blake3>=0.4          # канонический хэш
+cryptography>=42     # Ed25519-подпись индекса KB

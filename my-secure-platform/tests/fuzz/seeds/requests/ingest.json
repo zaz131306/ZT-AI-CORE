@@ -1,0 +1,1 @@
+{"jsonrpc":"zt-uds/1.0","method":"Ingest","params":{"documents":[{"doc_id":"seed-doc","content":"Марс — четвёртая планета от Солнца.","source_uri":"kb://seed","mime_type":"text/plain"}]},"id":2}

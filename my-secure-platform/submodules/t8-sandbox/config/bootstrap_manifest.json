@@ -1,0 +1,37 @@
+{
+  "_comment": [
+    "ZT-AI-CORE v2.4 — манифест Bootstrap Sequence D8 (F-E-07, чек-лист §2).",
+    "eager_loading.required — модули, ОБЯЗАННЫЕ импортироваться ДО применения",
+    "SECCOMP; в prod-поставке: torch, numpy, grpc, transformers, chromadb...",
+    "warmup_hooks — 'module:function', выполняющие 1 forward pass на dummy-данных.",
+    "seccomp.mode: strict — профиль Приложения В (prod); extended — dev-контур.",
+    "Пути разрешаются относительно каталога этого файла."
+  ],
+  "eager_loading": {
+    "required": [],
+    "optional": [
+      "numpy",
+      "grpc",
+      "torch",
+      "transformers",
+      "chromadb",
+      "sentence_transformers",
+      "rag_core",
+      "rag_core.models",
+      "llm_gateway"
+    ]
+  },
+  "warmup_hooks": [
+    "rag_core.models:warmup_all"
+  ],
+  "seccomp": {
+    "profile": "../bwrap/seccomp_profile.json",
+    "mode": "strict"
+  },
+  "rag_socket": "/run/zt-core/rag.sock",
+  "audit_spool": "",
+  "sbom_reference": "sbom_reference.json",
+  "main_loop": "",
+  "interpreter_min_version": [3, 11],
+  "require_glibc": true
+}

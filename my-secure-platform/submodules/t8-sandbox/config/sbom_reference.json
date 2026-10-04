@@ -1,0 +1,19 @@
+{
+  "_comment": [
+    "ЭТАЛОН SBOM для измерения целостности рантайма D8 (F-E-06, AC-05).",
+    "В prod генерируется сборочным конвейером (scripts/build-sandbox.sh sbom)",
+    "и подписывается offline-ключом Ed25519 (F-I-01/F-I-04). Пустые ожидания",
+    "ниже = placeholder dev-контура: сверка не ограничивает рантайм.",
+    "",
+    "Формат ожиданий:",
+    "  interpreter_sha256      — SHA-256 /usr/bin/python3.11 (пусто = не сверять)",
+    "  libraries               — { путь .so: sha256 } (пусто = не сверять)",
+    "  model_weights_merkle_root — Merkle-root весов (пусто = не сверять)"
+  ],
+  "format_version": "2.4",
+  "spdx_or_cyclonedx_ref": "",
+  "signature_ed25519": "",
+  "interpreter_sha256": "",
+  "libraries": {},
+  "model_weights_merkle_root": ""
+}

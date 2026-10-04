@@ -1,0 +1,133 @@
+{
+  "meta": {
+    "name": "zt-ai-core-d8-extended-dev",
+    "version": "2.4",
+    "spec_reference": "ТЗ ZT-AI-CORE v2.4, Приложение В + F-E-07 (dev-контур)",
+    "description": "РАСШИРЕННЫЙ профиль для dev/интеграционного контура. Содержит ВСЕ жёсткие запреты строгого профиля (clone3, PROT_EXEC после bootstrap, AF_INET/AF_INET6, ptrace/mount/bpf, exact-match clone), но дополнительно разрешает syscall, которые реально выполняет glibc+CPython в рантайме (ioctl, epoll_*, fcntl, newfstatat, statx, ...). defaultAction — SCMP_ACT_ERRNO(EPERM) вместо KILL, чтобы dev-процесс выживал при промахе и писал диагностику. В ПРОДАКШЕНЕ используется только seccomp_profile.json (строгий).",
+    "compiler": "python3 -m ztseccomp.compile --profile bwrap/seccomp_profile_extended.json"
+  },
+  "defaultAction": "SCMP_ACT_ERRNO",
+  "errnoRet": 1,
+  "architectures": ["SCMP_ARCH_X86_64", "SCMP_ARCH_AARCH64"],
+  "syscalls": [
+    {
+      "comment": "Полный запрет clone3 — без отклонений (Приложение В)",
+      "names": ["clone3"],
+      "action": "SCMP_ACT_KILL_PROCESS"
+    },
+    {
+      "comment": "Запрет execve/execveat после bootstrap",
+      "names": ["execve", "execveat"],
+      "action": "SCMP_ACT_KILL_PROCESS"
+    },
+    {
+      "comment": "Запрет операций ядра/отладки (как в строгом профиле)",
+      "names": [
+        "ptrace", "mount", "umount2", "chroot", "pivot_root", "bpf",
+        "keyctl", "add_key", "request_key", "kexec_load", "kexec_file_load",
+        "init_module", "finit_module", "delete_module", "perf_event_open",
+        "process_vm_readv", "process_vm_writev", "setns", "unshare",
+        "userfaultfd", "swapon", "swapoff", "reboot"
+      ],
+      "action": "SCMP_ACT_KILL_PROCESS"
+    },
+    {
+      "comment": "mmap PROT_EXEC -> KILL (Eager Loading: весь исполняемый код загружен до фильтра)",
+      "names": ["mmap"],
+      "action": "SCMP_ACT_KILL_PROCESS",
+      "args": [
+        {"index": 2, "value": 4, "mask": 4, "op": "SCMP_CMP_MASKED_EQ"}
+      ]
+    },
+    {
+      "comment": "mprotect PROT_EXEC -> KILL",
+      "names": ["mprotect"],
+      "action": "SCMP_ACT_KILL_PROCESS",
+      "args": [
+        {"index": 2, "value": 4, "mask": 4, "op": "SCMP_CMP_MASKED_EQ"}
+      ]
+    },
+    {
+      "comment": "socket(AF_INET) -> KILL (AC-01)",
+      "names": ["socket"],
+      "action": "SCMP_ACT_KILL_PROCESS",
+      "args": [{"index": 0, "value": 2, "op": "SCMP_CMP_EQ"}]
+    },
+    {
+      "comment": "socket(AF_INET6) -> KILL (AC-01)",
+      "names": ["socket"],
+      "action": "SCMP_ACT_KILL_PROCESS",
+      "args": [{"index": 0, "value": 10, "op": "SCMP_CMP_EQ"}]
+    },
+    {
+      "comment": "socket(AF_NETLINK) -> KILL",
+      "names": ["socket"],
+      "action": "SCMP_ACT_KILL_PROCESS",
+      "args": [{"index": 0, "value": 16, "op": "SCMP_CMP_EQ"}]
+    },
+    {
+      "comment": "socket(AF_PACKET) -> KILL",
+      "names": ["socket"],
+      "action": "SCMP_ACT_KILL_PROCESS",
+      "args": [{"index": 0, "value": 17, "op": "SCMP_CMP_EQ"}]
+    },
+    {
+      "comment": "socket — только AF_UNIX",
+      "names": ["socket"],
+      "action": "SCMP_ACT_ALLOW",
+      "args": [{"index": 0, "value": 1, "op": "SCMP_CMP_EQ"}]
+    },
+    {
+      "comment": "clone — маска Приложения В 0x10F00 (exact EQ)",
+      "names": ["clone"],
+      "action": "SCMP_ACT_ALLOW",
+      "args": [{"index": 0, "value": 69376, "op": "SCMP_CMP_EQ"}]
+    },
+    {
+      "comment": "clone — точная маска glibc pthread_create 0x3D0F00 (exact EQ)",
+      "names": ["clone"],
+      "action": "SCMP_ACT_ALLOW",
+      "args": [{"index": 0, "value": 4001536, "op": "SCMP_CMP_EQ"}]
+    },
+    {
+      "comment": "clone с иной маской -> KILL",
+      "names": ["clone"],
+      "action": "SCMP_ACT_KILL_PROCESS"
+    },
+    {
+      "comment": "Строгий whitelist Приложения В (группы 1-7)",
+      "names": [
+        "read", "write", "openat", "close", "fstat", "newfstatat", "statx",
+        "mmap", "mprotect", "munmap", "brk", "pread64", "pwrite64", "lseek",
+        "dup", "dup2", "dup3", "pipe2", "getdents64",
+        "set_robust_list", "set_tid_address", "gettid", "getpid", "futex",
+        "nanosleep", "clock_gettime", "clock_nanosleep", "gettimeofday",
+        "getrandom",
+        "connect", "bind", "accept4", "sendmsg", "recvmsg", "shutdown",
+        "getsockname",
+        "rt_sigaction", "rt_sigprocmask", "rt_sigreturn", "sigaltstack",
+        "exit", "exit_group",
+        "uname", "sysinfo", "getuid", "getgid", "geteuid", "getegid"
+      ],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "comment": "DEV-дополнение: syscall рантайма glibc/CPython (не входят в строгий whitelist Приложения В; разрешены ТОЛЬКО в dev-контуре)",
+      "names": [
+        "ioctl", "fcntl", "epoll_create1", "epoll_ctl", "epoll_wait",
+        "epoll_pwait", "poll", "ppoll", "pselect6", "newfstatat", "statx",
+        "readlinkat", "prlimit64", "rseq", "madvise", "mremap",
+        "sched_yield", "sched_getaffinity", "getcwd", "faccessat2",
+        "fsync", "fdatasync", "flock", "umask", "clock_getres", "eventfd2",
+        "memfd_create", "socketpair", "getsockopt", "setsockopt",
+        "getpeername", "sendto", "recvfrom", "readv", "writev",
+        "kill", "tgkill", "tkill", "arch_prctl", "getppid", "times",
+        "getrandom", "lstat", "stat", "access", "faccessat", "rename",
+        "renameat", "renameat2", "unlinkat", "mkdirat", "ftruncate",
+        "copy_file_range", "statfs", "fstatfs", "getdents", "select",
+        "wait4", "waitid", "sigaltstack", "getrlimit", "setrlimit"
+      ],
+      "action": "SCMP_ACT_ALLOW"
+    }
+  ]
+}

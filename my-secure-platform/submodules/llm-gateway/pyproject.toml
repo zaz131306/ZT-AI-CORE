@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zt-llm-gateway"
+version = "2.4.0"
+description = "ZT-AI-CORE L4 LLM Gateway: mTLS (TTL<=5min), Egress DLP, rate-limit, circuit breaker, allow-list (F-D-04)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "cryptography>=42",   # только тесты: генерация mTLS-сертификатов
+    "blake3>=0.4",        # канонический хэш egress-лога (fallback: blake2b)
+]
+
+[project.scripts]
+zt-llm-gateway = "llm_gateway.main:main"
+
+[tool.setuptools.packages.find]
+include = ["llm_gateway*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

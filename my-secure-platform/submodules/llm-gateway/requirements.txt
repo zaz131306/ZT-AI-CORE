@@ -1,0 +1,2 @@
+# Runtime: stdlib-only. Опционально (канонический BLAKE3 egress-лога):
+blake3>=0.4

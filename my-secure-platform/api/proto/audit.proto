@@ -1,0 +1,206 @@
+// ============================================================================
+// ZT-AI-CORE v2.4 — контракт WORM-аудита (L7)
+// BLAKE3 hash-chain (F-G-01/02), Ed25519-чекпоинты, anti-replay (F-G-03),
+// dual-anchor anti-truncation: TPM NV-Counter + S3 Object Lock (F-G-04/05).
+// ============================================================================
+syntax = "proto3";
+
+package zt.audit.v2;
+
+option go_package = "github.com/zt-ai-core/api/gen/go/audit/v2;auditv2";
+
+// ----------------------------------------------------------------------------
+// Перечисления
+// ----------------------------------------------------------------------------
+
+// Типы аудируемых событий (NF-09: 100% действий ИИ, IPC и оператора).
+enum RecordKind {
+  RECORD_KIND_UNSPECIFIED = 0;
+  RECORD_KIND_PROMPT = 1;                // промпт, отправленный ИИ
+  RECORD_KIND_RESPONSE = 2;              // ответ ИИ (+ вердикт валидатора, F-D-03 п.4)
+  RECORD_KIND_EGRESS = 3;                // egress-запрос LLM Gateway (F-D-04)
+  RECORD_KIND_IPC = 4;                   // IPC-событие через UDS-шину
+  RECORD_KIND_OPERATOR = 5;              // операторская команда
+  RECORD_KIND_FSM_EVENT = 6;             // переход FSM (StateEvent)
+  RECORD_KIND_INTEGRITY = 7;             // IntegrityReport (F-E-06)
+  RECORD_KIND_VALIDATOR_VERDICT = 8;     // хэш ответа + вердикт каскада
+  RECORD_KIND_SECCOMP_VIOLATION = 9;     // нарушение SECCOMP/eBPF
+  RECORD_KIND_BOOTSTRAP = 10;            // этап Bootstrap Sequence
+  RECORD_KIND_ATTESTATION = 11;          // TPM Quote / Remote Attestation (F-H-05)
+}
+
+// Вердикт сверки якорей при старте (F-G-04).
+enum ReconcileVerdict {
+  RECONCILE_VERDICT_UNSPECIFIED = 0;
+  RECONCILE_VERDICT_OK = 1;              // seq_local >= seq_ext, seq_TPM <= seq_local
+  RECONCILE_VERDICT_UNANCHORED_TAIL = 2; // seq_local > seq_ext — норма, нужен checkpoint
+  RECONCILE_VERDICT_TRUNCATION = 3;      // seq_TPM > seq_local ИЛИ seq_ext > seq_local
+  RECONCILE_VERDICT_EXT_ANCHOR_DOWN = 4; // S3 недоступен > 5 мин -> DEGRADED
+  RECONCILE_VERDICT_TPM_ANCHOR_DOWN = 5; // TPM NV недоступен -> чекпоинты только в S3
+}
+
+enum AppendRejectCode {
+  APPEND_REJECT_UNSPECIFIED = 0;
+  APPEND_REJECT_NONE = 1;                // запись принята
+  APPEND_REJECT_DUPLICATE_NONCE = 2;     // anti-replay (F-G-03)
+  APPEND_REJECT_CLOCK_SKEW = 3;          // timestamp вне TTL-окна
+  APPEND_REJECT_WRITE_LOCKED = 4;        // TRUNCATION: запись заблокирована (F-G-04)
+  APPEND_REJECT_SEQ_GAP = 5;             // нарушение монотонности seq
+  APPEND_REJECT_MALFORMED = 6;           // некорректный payload/поля
+}
+
+// ----------------------------------------------------------------------------
+// Запись и цепочка
+// ----------------------------------------------------------------------------
+
+// chain_hash_i = BLAKE3(previous_hash || payload_hash || timestamp || nonce)
+message AuditRecord {
+  uint64 seq = 1;                        // монотонный, строго +1
+  bytes payload_hash = 2;                // BLAKE3(payload), 32 байта
+  int64 timestamp_unix_ns = 3;
+  bytes nonce = 4;                       // 16 байт, getrandom()
+  bytes previous_hash = 5;               // chain_hash предыдущей записи (genesis: 32*0x00)
+  bytes record_signature = 6;            // Ed25519 (ключ в TPM/HSM — never exportable)
+  bytes chain_hash = 7;                  // BLAKE3-связка (см. формулу выше)
+  RecordKind kind = 8;
+  string source = 9;                     // компонент: "rag-core", "llm-gateway", "fsm"...
+  string subject = 10;                   // субъект действия (CN клиента, оператор)
+}
+
+message AppendRequest {
+  bytes payload = 1;                     // исходные данные (в цепь идёт только хэш)
+  RecordKind kind = 2;
+  string source = 3;
+  string subject = 4;
+  bytes nonce = 5;                       // пусто => сгенерировать getrandom()
+  int64 timestamp_unix_ns = 6;           // 0 => серверное время
+}
+
+message AppendResponse {
+  bool accepted = 1;
+  AppendRejectCode reject_code = 2;
+  uint64 seq = 3;
+  bytes payload_hash = 4;
+  bytes chain_hash = 5;
+  string reject_detail = 6;
+}
+
+message GetRecordRequest {
+  uint64 seq = 1;
+}
+
+// ----------------------------------------------------------------------------
+// Чекпоинты и якоря (F-G-04/05)
+// ----------------------------------------------------------------------------
+
+message Checkpoint {
+  uint64 first_seq = 1;
+  uint64 last_seq = 2;
+  bytes chain_head = 3;                  // chain_hash последней записи окна
+  int64 timestamp_unix_ns = 4;
+  bytes ed25519_signature = 5;           // Ed25519(private_key_in_TPM, checkpoint_hash)
+  bytes signer_public_key = 6;
+  bytes checkpoint_hash = 7;             // BLAKE3(first_seq||last_seq||chain_head||ts)
+}
+
+message GetLatestCheckpointRequest {}
+
+message PublishCheckpointRequest {
+  bool force = 1;                        // принудительно (runbook), игнорируя 1000/60s
+  bool anchor_tpm = 2;                   // попытаться записать TPM NV (лимит 1/час)
+  bool anchor_ext = 3;                   // попытаться записать внешний WORM (S3)
+}
+
+message PublishCheckpointResponse {
+  bool published = 1;
+  Checkpoint checkpoint = 2;
+  bool tpm_anchored = 3;                 // false если < 1 часа с прошлой записи (F-G-05)
+  bool ext_anchored = 4;
+  string detail = 5;
+}
+
+// Состояние dual-anchor (F-G-04).
+message AnchorStatus {
+  uint64 seq_tpm = 1;                    // заякорено в TPM NV-Counter
+  uint64 seq_ext = 2;                    // заякорено во внешнем WORM (S3 Object Lock)
+  int64 tpm_last_write_unix_ns = 3;      // лимит: не чаще 1 раза в час
+  double tpm_nv_wear_percent = 4;        // >= 80 -> DEGRADED + алерт (F-G-05)
+  bool tpm_available = 5;
+  bool ext_available = 6;
+  int64 ext_last_ok_unix_ns = 7;         // недоступен > 5 мин -> DEGRADED
+  uint64 buffered_checkpoints = 8;       // локальный защищённый буфер при EXT_DOWN
+}
+
+message GetAnchorStatusRequest {}
+
+// Сверка при старте (анти-truncation, AC-03).
+message ReconcileRequest {
+  bool block_writes_on_truncation = 1;   // MUST true (F-G-04)
+}
+
+message ReconcileReport {
+  ReconcileVerdict verdict = 1;
+  uint64 seq_local = 2;
+  AnchorStatus anchors = 3;
+  string action = 4;                     // напр. "systemctl start zt-recovery.service"
+  bytes last_checkpoint_hash = 5;
+  int64 timestamp_unix_ns = 6;
+}
+
+// ----------------------------------------------------------------------------
+// Верификация цепочки
+// ----------------------------------------------------------------------------
+
+message VerifyChainRequest {
+  bool deep = 1;                         // true — пересчёт всех chain_hash + подписей
+  uint64 from_seq = 2;                   // 0 => от genesis/последнего checkpoint
+  uint64 to_seq = 3;                     // 0 => до хвоста
+  bool verify_signatures = 4;            // Ed25519-проверка record_signature
+}
+
+message VerifyChainReport {
+  bool valid = 1;
+  uint64 records_checked = 2;
+  uint64 first_bad_seq = 3;              // 0 если valid
+  string error = 4;                      // "hash mismatch" | "signature invalid" | "seq gap"
+  bytes recomputed_head = 5;
+  uint64 duration_ms = 6;
+}
+
+message StreamRecordsRequest {
+  uint64 from_seq = 1;                   // стрим с указанной записи (для зеркалирования)
+  bool follow = 2;                       // tail -f режим
+}
+
+// Статистика производительности (NF-03: >= 10 000 записей/с).
+message ThroughputStats {
+  double appends_per_sec_p50 = 1;
+  double appends_per_sec_p99 = 2;
+  uint64 total_records = 3;
+  uint64 bytes_on_disk = 4;
+  string sync_policy = 5;                // every_record | group_commit | on_checkpoint
+}
+
+message GetStatsRequest {}
+
+// ----------------------------------------------------------------------------
+// Сервис WORM-аудита
+// ----------------------------------------------------------------------------
+service AuditService {
+  // Append-only запись события (100% покрытие, NF-09).
+  rpc Append(AppendRequest) returns (AppendResponse);
+  // Чтение записи по seq.
+  rpc GetRecord(GetRecordRequest) returns (AuditRecord);
+  // Верификация целостности цепочки (локально).
+  rpc VerifyChain(VerifyChainRequest) returns (VerifyChainReport);
+  // Чекпоинты и dual-anchor.
+  rpc GetLatestCheckpoint(GetLatestCheckpointRequest) returns (Checkpoint);
+  rpc PublishCheckpoint(PublishCheckpointRequest) returns (PublishCheckpointResponse);
+  rpc GetAnchorStatus(GetAnchorStatusRequest) returns (AnchorStatus);
+  // Anti-truncation сверка при старте (AC-03).
+  rpc Reconcile(ReconcileRequest) returns (ReconcileReport);
+  // Стрим записей для внешнего зеркала.
+  rpc StreamRecords(StreamRecordsRequest) returns (stream AuditRecord);
+  // Производительность (NF-03).
+  rpc GetStats(GetStatsRequest) returns (ThroughputStats);
+}

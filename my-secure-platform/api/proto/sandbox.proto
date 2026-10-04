@@ -1,0 +1,218 @@
+// ============================================================================
+// ZT-AI-CORE v2.4 — контракт песочницы D8 (L5)
+// Управление жизненным циклом sandbox-процессов, bootstrap-события,
+// отчёты целостности рантайма (F-E-06), статусы SECCOMP/eBPF.
+// ============================================================================
+syntax = "proto3";
+
+package zt.sandbox.v2;
+
+option go_package = "github.com/zt-ai-core/api/gen/go/sandbox/v2;sandboxv2";
+
+// ----------------------------------------------------------------------------
+// Перечисления
+// ----------------------------------------------------------------------------
+
+// Этапы Bootstrap Sequence (чек-лист §2 — порядок строгий).
+enum BootstrapStage {
+  BOOTSTRAP_STAGE_UNSPECIFIED = 0;
+  BOOTSTRAP_STAGE_BWRAP_LAUNCH = 1;      // Шаг 1: bwrap без --seccomp
+  BOOTSTRAP_STAGE_EXEC_INTERPRETER = 2;  // Шаг 2: execve python3.11 (glibc)
+  BOOTSTRAP_STAGE_EAGER_LOADING = 3;     // Шаг 3: import C-extensions, веса
+  BOOTSTRAP_STAGE_WARMUP = 4;            // Шаг 3: forward pass на dummy-данных
+  BOOTSTRAP_STAGE_MAPS_BASELINE = 5;     // Шаг 3: snapshot /proc/self/maps
+  BOOTSTRAP_STAGE_CAPABILITY_DROP = 6;   // Шаг 4: PR_SET_NO_NEW_PRIVS + PR_CAPBSET_DROP
+  BOOTSTRAP_STAGE_SECCOMP_ARMED = 7;     // Шаг 5: SECCOMP_SET_MODE_FILTER
+  BOOTSTRAP_STAGE_MAPS_VERIFY = 8;       // Шаг 6: сверка maps с baseline
+  BOOTSTRAP_STAGE_UDS_CONNECT = 9;       // Шаг 6: /run/zt-core/rag.sock
+  BOOTSTRAP_STAGE_RUNNING = 10;          // Шаг 6: основной цикл RAG
+}
+
+enum SandboxState {
+  SANDBOX_STATE_UNSPECIFIED = 0;
+  SANDBOX_STATE_BOOTSTRAPPING = 1;
+  SANDBOX_STATE_RUNNING = 2;
+  SANDBOX_STATE_DEGRADED = 3;
+  SANDBOX_STATE_EXITED = 4;
+  SANDBOX_STATE_KILLED_BY_SECCOMP = 5;   // AC-01/AC-09: нарушение профиля
+  SANDBOX_STATE_BOOT_FAILSAFE = 6;       // F-E-06: целостность не подтверждена
+}
+
+// Режим SECCOMP-профиля (Приложение В ТЗ).
+enum SeccompProfileMode {
+  SECCOMP_PROFILE_MODE_UNSPECIFIED = 0;
+  SECCOMP_PROFILE_MODE_STRICT = 1;       // точный whitelist Приложения В, default KILL_PROCESS
+  SECCOMP_PROFILE_MODE_EXTENDED = 2;     // dev-контур: + рантайм-сайские вызовы, default ERRNO(EPERM)
+}
+
+enum ViolationKind {
+  VIOLATION_UNSPECIFIED = 0;
+  VIOLATION_SECCOMP_SYSCALL = 1;         // запрещённый syscall (kill)
+  VIOLATION_MMAP_PROT_EXEC = 2;          // lazy-загрузка после SECCOMP (F-E-07)
+  VIOLATION_CLONE3 = 3;                  // полный запрет clone3
+  VIOLATION_NET_SOCKET = 4;              // AF_INET/AF_INET6 (AC-01)
+  VIOLATION_MAPS_DRIFT = 5;              // расхождение /proc/self/maps (SIGKILL)
+  VIOLATION_EBPF_PATH = 6;               // ФС вне /tmp, /var/rag (F-E-03)
+  VIOLATION_UDS_SUN_PATH = 7;            // connect не в /run/zt-core/*.sock (F-E-04)
+}
+
+// ----------------------------------------------------------------------------
+// Сообщения
+// ----------------------------------------------------------------------------
+
+// Ресурсные лимиты cgroup v2 для D8 (DoS-контрмера, NF-06).
+message ResourceLimits {
+  uint64 memory_max_bytes = 1;           // cgroup memory.max (14B-модель: <= 12 ГБ)
+  uint64 memory_high_bytes = 2;          // cgroup memory.high
+  double cpu_max_cores = 3;              // cgroup cpu.max
+  string cpuset = 4;                     // isolcpus/cpuset выделенных ядер (F-E-05)
+  uint64 pids_max = 5;                   // cgroup pids.max
+  uint64 exec_timeout_ms = 6;            // watchdog-таймаут сессии
+  bool ksm_disabled = 7;                 // MUST true (F-E-05, AC-07)
+  bool mlock_weights = 8;                // mlock() крипто-буферов и весов (F-E-05)
+}
+
+// Ссылка на SECCOMP-профиль (bwrap/seccomp_profile.json -> custom BPF).
+message SeccompProfileRef {
+  string profile_path = 1;               // путь к JSON-профилю Приложения В
+  SeccompProfileMode mode = 2;
+  bytes compiled_bpf_hash = 3;           // BLAKE3 скомпилированного BPF (целостность)
+}
+
+message SandboxSpec {
+  string name = 1;                       // идентификатор инстанса D8
+  string interpreter = 2;                // /usr/bin/python3.11 (glibc — F-E-08)
+  string entrypoint = 3;                 // /opt/rag/bootstrap.py
+  repeated string ro_binds = 4;          // --ro-bind источники (поверх /)
+  repeated string rw_binds = 5;          // --bind: /var/rag, /tmp, /run/zt-core
+  repeated string allowed_uds_paths = 6; // sun_path allow-list (F-E-04)
+  ResourceLimits limits = 7;
+  SeccompProfileRef seccomp = 8;
+  bool unshare_net = 9;                  // MUST true (F-E-01)
+  bool unshare_pid = 10;                 // MUST true (F-E-01)
+  bool die_with_parent = 11;             // MUST true (F-E-01)
+  bytes sbom_reference_hash = 12;        // эталон SBOM для F-E-06
+}
+
+message StartSandboxRequest {
+  SandboxSpec spec = 1;
+  bytes operator_nonce = 2;              // anti-replay для операторской команды
+  string operator_id = 3;
+}
+
+message StartSandboxResponse {
+  bool accepted = 1;
+  string sandbox_id = 2;
+  uint32 host_pid = 3;
+  string rejection_reason = 4;
+}
+
+message StopSandboxRequest {
+  string sandbox_id = 1;
+  string reason = 2;
+  bool force_kill = 3;                   // SIGKILL без graceful drain
+}
+
+message StopSandboxResponse {
+  bool stopped = 1;
+  uint32 exit_code = 2;
+  int32 exit_signal = 3;
+}
+
+message GetStatusRequest {
+  string sandbox_id = 1;                 // пусто — все инстансы
+}
+
+message SandboxStatus {
+  string sandbox_id = 1;
+  SandboxState state = 2;
+  BootstrapStage stage = 3;
+  uint32 host_pid = 4;
+  SeccompProfileMode seccomp_mode = 5;
+  bool seccomp_armed = 6;
+  // Состояние capability-масок после Шага 4 (AC-10: все нули).
+  string cap_eff = 7;                    // hex из /proc/self/status
+  string cap_prm = 8;
+  string cap_inh = 9;
+  uint32 no_new_privs = 10;              // MUST 1
+  int64 started_at_unix_ns = 11;
+  uint64 rss_bytes = 12;
+  uint64 violations_total = 13;
+}
+
+// Событие bootstrap-последовательности (стримится в WORM, NF-09).
+message BootstrapEvent {
+  string sandbox_id = 1;
+  BootstrapStage stage = 2;
+  bool ok = 3;
+  string detail = 4;
+  int64 timestamp_unix_ns = 5;
+}
+
+// Загруженная библиотека/артефакт из /proc/self/maps.
+message LoadedLibrary {
+  string path = 1;
+  bytes sha256 = 2;
+  uint64 load_address = 3;
+}
+
+// Отчёт целостности рантайма D8 (F-E-06, AC-05).
+message IntegrityReport {
+  string sandbox_id = 1;
+  bytes interpreter_sha256 = 2;          // SHA-256 интерпретатора
+  repeated LoadedLibrary libraries = 3;  // все .so из /proc/self/maps
+  bytes model_weights_merkle_root = 4;   // Merkle-root весов (SHA-256)
+  bytes maps_baseline_hash = 5;          // BLAKE3 baseline snapshot maps
+  bytes maps_current_hash = 6;           // BLAKE3 post-SECCOMP maps
+  bool matches_sbom = 7;                 // сверка с подписанным SBOM
+  bool maps_drift_detected = 8;          // расхождение => SIGKILL
+  int64 timestamp_unix_ns = 9;
+}
+
+message GetIntegrityReportRequest {
+  string sandbox_id = 1;
+}
+
+message WatchBootstrapRequest {
+  string sandbox_id = 1;
+}
+
+// Нарушение политики изоляции (стримится оператору и в WORM).
+message ViolationEvent {
+  string sandbox_id = 1;
+  ViolationKind kind = 2;
+  uint64 syscall_nr = 3;                 // для SECCOMP-нарушений
+  uint64 syscall_arg0 = 4;               // напр. flags у clone / domain у socket
+  int64 timestamp_unix_ns = 5;
+}
+
+message WatchViolationsRequest {
+  string sandbox_id = 1;
+}
+
+// Peer-креденшелы UDS-соединения (F-E-04: проверка SO_PEERCRED).
+message PeerCredentials {
+  uint32 pid = 1;
+  uint32 uid = 2;
+  uint32 gid = 3;
+  string sun_path = 4;                   // валидированный путь сокета
+  bool verified = 5;                     // SO_PEERCRED + sun_path allow-list пройдены
+}
+
+// ----------------------------------------------------------------------------
+// Сервис управления песочницей (хост-сторона, D5)
+// ----------------------------------------------------------------------------
+service SandboxControl {
+  // Запустить D8 через bwrap + Bootstrap Sequence.
+  rpc Start(StartSandboxRequest) returns (StartSandboxResponse);
+  // Остановить/убить D8.
+  rpc Stop(StopSandboxRequest) returns (StopSandboxResponse);
+  // Текущий статус (состояние, stage, capabilities, violations).
+  rpc GetStatus(GetStatusRequest) returns (SandboxStatus);
+  // Отчёт целостности рантайма (F-E-06).
+  rpc GetIntegrityReport(GetIntegrityReportRequest) returns (IntegrityReport);
+  // Стрим событий Bootstrap Sequence.
+  rpc WatchBootstrap(WatchBootstrapRequest) returns (stream BootstrapEvent);
+  // Стрим нарушений политик изоляции.
+  rpc WatchViolations(WatchViolationsRequest) returns (stream ViolationEvent);
+}

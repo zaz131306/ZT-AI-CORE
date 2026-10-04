@@ -1,0 +1,187 @@
+{
+  "meta": {
+    "name": "zt-ai-core-d8-strict",
+    "version": "2.4",
+    "spec_reference": "ТЗ ZT-AI-CORE v2.4, Приложение В (SECCOMP-профиль для D8, строгий)",
+    "description": "Строгий whitelist-профиль D8. Компилируется в classic BPF инструментом ztseccomp (submodules/t8-sandbox/seccomp). Семантика: first-match-wins; правила с args оцениваются в порядке JSON, затем правила без args; промах -> defaultAction.",
+    "bootstrap_rule": "Все операции, требующие PROT_EXEC (загрузка C-extensions, инициализация рантайма, warm-up моделей), выполняются ДО применения фильтра (F-E-07). После применения фильтра любой mmap/mprotect с PROT_EXEC -> SCMP_ACT_KILL_PROCESS.",
+    "clone_policy": "clone разрешён ТОЛЬКО при точном совпадении маски флагов (SCMP_CMP_EQ). Маска 0x10F00 = CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD (Приложение В). Маска 0x3D0F00 = тот же набор + CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID — точный набор флагов glibc pthread_create (x86_64/aarch64, F-E-08: только glibc). Оба правила — EQ без wildcard.",
+    "clone3_policy": "clone3 запрещён ПОЛНОСТЬЮ (SCMP_ACT_KILL_PROCESS): аргументы передаются через указатель на структуру clone_args, что невозможно безопасно проверить чистым seccomp без seccomp_unotify.",
+    "network_policy": "socket — только AF_UNIX (args[0] == 1). AF_INET/AF_INET6 — явный KILL. Семейство адреса в connect/bind через указатель в cBPF непроверяемо — контролируется eBPF-хуком (sun_path == /run/zt-core/rag.sock, F-E-03/F-E-04) и тем, что иной сокет, кроме AF_UNIX, создать невозможно.",
+    "compiler": "python3 -m ztseccomp.compile --profile bwrap/seccomp_profile.json",
+    "archs": ["x86_64", "aarch64"],
+    "default_action_rationale": "SCMP_ACT_KILL_PROCESS для всего, что не в whitelist (строгий профиль Приложения В)."
+  },
+  "defaultAction": "SCMP_ACT_KILL_PROCESS",
+  "architectures": ["SCMP_ARCH_X86_64", "SCMP_ARCH_AARCH64"],
+  "syscalls": [
+    {
+      "comment": "Полный запрет clone3 (Приложение В, раздел 'Запрещено')",
+      "names": ["clone3"],
+      "action": "SCMP_ACT_KILL_PROCESS"
+    },
+    {
+      "comment": "Запрет execve/execveat после bootstrap (Приложение В)",
+      "names": ["execve", "execveat"],
+      "action": "SCMP_ACT_KILL_PROCESS"
+    },
+    {
+      "comment": "Запрет ptrace/mount/umount/chroot/pivot_root/bpf и прочих операций ядра",
+      "names": [
+        "ptrace", "mount", "umount2", "chroot", "pivot_root", "bpf",
+        "keyctl", "add_key", "request_key", "kexec_load", "kexec_file_load",
+        "init_module", "finit_module", "delete_module", "perf_event_open",
+        "process_vm_readv", "process_vm_writev", "setns", "unshare",
+        "userfaultfd", "swapon", "swapoff", "reboot", "settimeofday",
+        "clock_settime", "adjtimex", "clock_adjtime", "acct", "quotactl",
+        "syslog", "lookup_dcookie", "nfsservctl", "open_by_handle_at",
+        "name_to_handle_at", "personality", "vm86", "modify_ldt",
+        "create_module", "get_kernel_syms", "ioperm", "iopl",
+        "mmap_4kpage", "sysfs", "uselib", "ustat"
+      ],
+      "action": "SCMP_ACT_KILL_PROCESS"
+    },
+    {
+      "comment": "mmap: PROT_EXEC (args[2] & 0x4) в runtime -> KILL (F-E-07, кастомный BPF)",
+      "names": ["mmap"],
+      "action": "SCMP_ACT_KILL_PROCESS",
+      "args": [
+        {"index": 2, "value": 4, "mask": 4, "op": "SCMP_CMP_MASKED_EQ"}
+      ]
+    },
+    {
+      "comment": "mprotect: PROT_EXEC (args[2] & 0x4) в runtime -> KILL (F-E-07)",
+      "names": ["mprotect"],
+      "action": "SCMP_ACT_KILL_PROCESS",
+      "args": [
+        {"index": 2, "value": 4, "mask": 4, "op": "SCMP_CMP_MASKED_EQ"}
+      ]
+    },
+    {
+      "comment": "socket(AF_INET) — явный KILL (AC-01)",
+      "names": ["socket"],
+      "action": "SCMP_ACT_KILL_PROCESS",
+      "args": [
+        {"index": 0, "value": 2, "op": "SCMP_CMP_EQ"}
+      ]
+    },
+    {
+      "comment": "socket(AF_INET6) — явный KILL (AC-01)",
+      "names": ["socket"],
+      "action": "SCMP_ACT_KILL_PROCESS",
+      "args": [
+        {"index": 0, "value": 10, "op": "SCMP_CMP_EQ"}
+      ]
+    },
+    {
+      "comment": "socket(AF_NETLINK=16)/AF_PACKET(17) — KILL (обход изоляции L3-трафиком)",
+      "names": ["socket"],
+      "action": "SCMP_ACT_KILL_PROCESS",
+      "args": [
+        {"index": 0, "value": 16, "op": "SCMP_CMP_EQ"}
+      ]
+    },
+    {
+      "comment": "socket(AF_PACKET) — KILL",
+      "names": ["socket"],
+      "action": "SCMP_ACT_KILL_PROCESS",
+      "args": [
+        {"index": 0, "value": 17, "op": "SCMP_CMP_EQ"}
+      ]
+    },
+    {
+      "comment": "socket — ТОЛЬКО AF_UNIX (args[0] == 1); прочие семейства не совпадут ни с одним правилом и уйдут в defaultAction=KILL",
+      "names": ["socket"],
+      "action": "SCMP_ACT_ALLOW",
+      "args": [
+        {"index": 0, "value": 1, "op": "SCMP_CMP_EQ"}
+      ]
+    },
+    {
+      "comment": "clone — маска Приложения В: CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD = 0x10F00 (exact EQ)",
+      "names": ["clone"],
+      "action": "SCMP_ACT_ALLOW",
+      "args": [
+        {"index": 0, "value": 69376, "op": "SCMP_CMP_EQ"}
+      ]
+    },
+    {
+      "comment": "clone — точная маска glibc pthread_create: 0x3D0F00 = 0x10F00 | CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID (exact EQ; F-E-08 требует glibc)",
+      "names": ["clone"],
+      "action": "SCMP_ACT_ALLOW",
+      "args": [
+        {"index": 0, "value": 4001536, "op": "SCMP_CMP_EQ"}
+      ]
+    },
+    {
+      "comment": "clone с любой другой маской флагов — KILL (например CLONE_NEWUSER|... — попытки ре-изоляции/побега)",
+      "names": ["clone"],
+      "action": "SCMP_ACT_KILL_PROCESS"
+    },
+    {
+      "comment": "ioctl — ТОЛЬКО FIONBIO (0x5421): Python socket.settimeout() переключает O_NONBLOCK на собственном fd (используется UDS-клиентом шины). Иные запросы -> KILL.",
+      "names": ["ioctl"],
+      "action": "SCMP_ACT_ALLOW",
+      "args": [
+        {"index": 1, "value": 21537, "op": "SCMP_CMP_EQ"}
+      ]
+    },
+    {
+      "comment": "ioctl — ТОЛЬКО TCGETS (0x5401): CPython io.open() выполняет isatty()-проверку каждого fd; любой иной ioctl-запрос (управление устройствами, TIOCL*, KD*, SIOC* и т.д.) -> KILL. Точное совпадение args[1] (SCMP_CMP_EQ).",
+      "names": ["ioctl"],
+      "action": "SCMP_ACT_ALLOW",
+      "args": [
+        {"index": 1, "value": 21505, "op": "SCMP_CMP_EQ"}
+      ]
+    },
+    {
+      "comment": "Whitelist, группа 1: базовые операции с памятью и файлами. newfstatat/statx включены, потому что glibc >= 2.33 (F-E-08 требует именно glibc) реализует fstat()/stat() через statx с fallback newfstatat — без них группа 'fstat' из Приложения В неработоспособна на современном ABI. Это read-only метаданные: новой поверхности атаки относительно уже разрешённого openat не добавляют.",
+      "names": [
+        "read", "write", "openat", "close", "fstat", "newfstatat", "statx",
+        "mmap", "mprotect", "munmap", "brk", "pread64", "pwrite64", "lseek",
+        "dup", "dup2", "dup3", "pipe2", "getdents64"
+      ],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "comment": "Whitelist, группа 2: управление потоками (clone — только правилами выше)",
+      "names": [
+        "set_robust_list", "set_tid_address", "gettid", "getpid", "futex"
+      ],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "comment": "Whitelist, группа 3: время и сон",
+      "names": ["nanosleep", "clock_gettime", "clock_nanosleep", "gettimeofday"],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "comment": "Whitelist, группа 4: случайность (только getrandom — Приложение Б п.4)",
+      "names": ["getrandom"],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "comment": "Whitelist, группа 5: сеть — строго Unix Domain Sockets (socket — правилом выше; семейство адреса connect/bind контролирует eBPF sun_path-хук)",
+      "names": [
+        "connect", "bind", "accept4", "sendmsg", "recvmsg", "shutdown",
+        "getsockname"
+      ],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "comment": "Whitelist, группа 6: сигналы и завершение",
+      "names": [
+        "rt_sigaction", "rt_sigprocmask", "rt_sigreturn", "sigaltstack",
+        "exit", "exit_group"
+      ],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "comment": "Whitelist, группа 7: информация о системе (безопасные, read-only)",
+      "names": [
+        "uname", "sysinfo", "getuid", "getgid", "geteuid", "getegid"
+      ],
+      "action": "SCMP_ACT_ALLOW"
+    }
+  ]
+}

@@ -1,0 +1,207 @@
+# =============================================================================
+# ZT-AI-CORE v2.4 — dev/integration контур (Раздел 5 ТЗ)
+# Сервисы: llm-gateway (L4), rag-core (L8/D8), worm-audit (L7), fsm-engine (L6)
+#
+# ВАЖНО: в продакшене D8 (rag-core) запускается НЕ в docker, а на хосте через
+# bwrap + SECCOMP + eBPF (submodules/t8-sandbox/bwrap/run.sh). Данный compose —
+# детерминированный стенд для интеграции и chaos-тестов (чек-лист §5).
+# Zero-trust гигиена включена для всех сервисов: cap_drop ALL,
+# no-new-privileges, read-only rootfs, лимиты RAM/CPU.
+# =============================================================================
+
+name: zt-ai-core
+
+x-zt-hardening: &zt-hardening
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  read_only: true
+  tmpfs:
+    - /tmp:size=256m,mode=1777
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: "50m"
+      max-file: "3"
+
+volumes:
+  zt-run:          # /run/zt-core — Unix Domain Sockets (IPC-шина L4)
+  worm-data:       # /var/worm — append-only журнал L7 (WORM)
+  rag-data:        # /var/rag — база знаний D8 (единственная rw-область)
+  fsm-data:        # /var/lib/zt-fsm — WAL FSM-движка
+  keys:            # /etc/zt-core/keys — ключи/сертификаты (в prod — TPM/HSM)
+
+networks:
+  zt-internal:     # шина компонентов (аналог UDS-периметра)
+    internal: true # без выхода наружу — egress только через llm-gateway
+  zt-egress:       # единственный внешний сегмент — только для llm-gateway (L4)
+
+services:
+  # --------------------------------------------------------------------------
+  # L7: WORM-аудит (BLAKE3 hash-chain, Ed25519-чекпоинты, dual-anchor)
+  # --------------------------------------------------------------------------
+  worm-audit:
+    <<: *zt-hardening
+    build:
+      context: .
+      dockerfile: submodules/worm-audit/Dockerfile
+    image: zt-ai-core/worm-audit:2.4
+    command: >
+      zt-worm-audit serve
+      --socket /run/zt-core/audit.sock
+      --chain /var/worm/audit-chain.jsonl
+      --checkpoints /var/worm/checkpoints.jsonl
+      --anchor-dir /var/worm/anchors
+      --checkpoint-every-records 1000
+      --checkpoint-every-secs 60
+    volumes:
+      - zt-run:/run/zt-core
+      - worm-data:/var/worm
+      - keys:/etc/zt-core/keys:ro
+    environment:
+      ZT_WORM_SYNC_POLICY: group_commit      # NF-03: >= 10 000 записей/с
+      ZT_WORM_NONCE_TTL_SECS: "300"          # F-G-03: anti-replay окно
+      ZT_TPM_MOCK_WEAR_LIMIT_PCT: "80"       # F-G-05: алерт износа NV
+      RUST_LOG: warn
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+    healthcheck:
+      test: ["CMD", "zt-worm-audit", "healthcheck", "--socket", "/run/zt-core/audit.sock"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    networks: [zt-internal]
+
+  # --------------------------------------------------------------------------
+  # L6: FSM-движок (матрица Lifecycle×Mode, WAL, Pending Rollback Counter)
+  # --------------------------------------------------------------------------
+  fsm-engine:
+    <<: *zt-hardening
+    build:
+      context: .
+      dockerfile: submodules/fsm-engine/Dockerfile
+    image: zt-ai-core/fsm-engine:2.4
+    command: >
+      zt-fsm-engine serve
+      --socket /run/zt-core/fsm.sock
+      --wal /var/lib/zt-fsm/wal.log
+      --audit-socket /run/zt-core/audit.sock
+    volumes:
+      - zt-run:/run/zt-core
+      - fsm-data:/var/lib/zt-fsm
+    environment:
+      ZT_FSM_WATCHDOG_TIMEOUT_MS: "500"      # NF-05: MTTR детекции
+      ZT_FSM_MODE: NOMINAL
+      RUST_LOG: warn
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.25"
+    depends_on:
+      worm-audit:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "zt-fsm-engine", "healthcheck", "--socket", "/run/zt-core/fsm.sock"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    networks: [zt-internal]
+
+  # --------------------------------------------------------------------------
+  # L4: LLM Gateway (mTLS TTL<=5мин, Egress DLP, rate-limit, circuit breaker)
+  # --------------------------------------------------------------------------
+  llm-gateway:
+    <<: *zt-hardening
+    build:
+      context: .
+      dockerfile: submodules/llm-gateway/Dockerfile
+    image: zt-ai-core/llm-gateway:2.4
+    command: >
+      python3 -m llm_gateway.main
+      --listen 0.0.0.0
+      --port 8443
+      --audit-socket /run/zt-core/audit.sock
+    volumes:
+      - zt-run:/run/zt-core
+      - keys:/etc/zt-core/keys:ro
+    environment:
+      ZT_GATEWAY_TLS_CERT: /etc/zt-core/keys/gateway-server.crt
+      ZT_GATEWAY_TLS_KEY: /etc/zt-core/keys/gateway-server.key
+      ZT_GATEWAY_CA: /etc/zt-core/keys/zt-ca.crt
+      ZT_GATEWAY_CLIENT_MAX_TTL_SECS: "300"  # F-D-04: TTL сертификата D8 <= 5 мин
+      ZT_GATEWAY_RATE_LIMIT_PER_MIN: "60"    # F-D-04: rate-limit
+      ZT_GATEWAY_ALLOWLIST: "api.provider-one.example,api.provider-two.example"
+      ZT_GATEWAY_MOCK_UPSTREAM: "1"          # dev-стенд: мок апстрима
+      ZT_BREAKER_FAIL_THRESHOLD: "5"
+      ZT_BREAKER_RESET_SECS: "30"
+    ports:
+      - "8443:8443"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+    depends_on:
+      worm-audit:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python3", "-m", "llm_gateway.healthcheck", "--port", "8443"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks: [zt-internal, zt-egress]
+
+  # --------------------------------------------------------------------------
+  # L8/D8: RAG-core (когнитивный payload; в dev — без bwrap, в prod — внутри L5)
+  # --------------------------------------------------------------------------
+  rag-core:
+    <<: *zt-hardening
+    build:
+      context: .
+      dockerfile: submodules/rag-core/Dockerfile
+    command: >
+      python3 -m rag_core.server
+      --socket /run/zt-core/rag.sock
+      --kb /var/rag/kb
+      --audit-socket /run/zt-core/audit.sock
+      --gateway https://llm-gateway:8443
+    volumes:
+      - zt-run:/run/zt-core
+      - rag-data:/var/rag
+      - keys:/etc/zt-core/keys:ro
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"           # F-E-07
+      GRPC_DISABLE_DYNAMIC_PLUGINS: "1"
+      TORCH_DISABLE_DYNAMIC_JIT: "1"
+      ZT_RAG_EMBEDDER: hashing                # dev; prod: bge-m3 / e5-small
+      ZT_RAG_TOP_K_MAX: "8"                   # защита от Model Extraction
+      ZT_VALIDATOR_COS_ACCEPT: "0.85"         # F-D-03 пороги каскада
+      ZT_VALIDATOR_COS_REJECT: "0.60"
+    deploy:
+      resources:
+        limits:
+          memory: 2G                          # NF-06 (dev; prod 14B-модель: <=12G)
+          cpus: "2.0"
+    depends_on:
+      worm-audit:
+        condition: service_healthy
+      fsm-engine:
+        condition: service_healthy
+      llm-gateway:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python3", "-m", "rag_core.healthcheck", "--socket", "/run/zt-core/rag.sock"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks: [zt-internal]

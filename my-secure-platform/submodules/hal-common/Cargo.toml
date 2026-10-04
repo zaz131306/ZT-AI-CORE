@@ -1,0 +1,21 @@
+[package]
+name = "zt-hal-common"
+version = "2.4.0"
+edition = "2021"
+rust-version = "1.75"
+description = "ZT-AI-CORE HAL: крипто-профиль (L3), тепловой/энергетический бюджет (L0-L2), платформенные проверки, операции TPM 2.0"
+license = "Apache-2.0"
+repository = "https://github.com/zt-ai-core/my-secure-platform"
+
+[dependencies]
+blake3 = "1"
+sha2 = "0.10"
+ed25519-dalek = { version = "2", features = ["pkcs8"] }
+thiserror = "1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lib]
+name = "zt_hal_common"
+path = "src/lib.rs"

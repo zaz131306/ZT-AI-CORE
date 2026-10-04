@@ -1,0 +1,1 @@
+{"jsonrpc":"zt-uds/1.0","method":"Query","params":{"question":"Какие планеты входят в солнечную систему?","query_id":"seed-1","top_k":3},"id":1}

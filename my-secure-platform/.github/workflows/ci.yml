@@ -1,0 +1,145 @@
+# =============================================================================
+# ZT-AI-CORE v2.4 — Continuous Integration
+# Сборка и тесты всех подмодулей: Rust (L2/L3, L6, L7), Python (L4, L5, L8),
+# proto-контракты, SECCOMP-верификация, shell-линтинг.
+# =============================================================================
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  rust:
+    name: Rust (hal-common, fsm-engine, worm-audit)
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        crate: [hal-common, fsm-engine, worm-audit]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: submodules/${{ matrix.crate }}
+      - name: Build
+        run: cargo build --release
+        working-directory: submodules/${{ matrix.crate }}
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+        working-directory: submodules/${{ matrix.crate }}
+      - name: Test
+        run: cargo test --verbose
+        working-directory: submodules/${{ matrix.crate }}
+      - name: NF-03 benchmark (worm-audit, release)
+        if: matrix.crate == 'worm-audit'
+        run: |
+          ./target/release/zt-worm-audit benchmark \
+            --chain-dir /tmp/bench --records 20000 --sync-policy group_commit
+
+  # ---------------------------------------------------------------------------
+  python:
+    name: Python (t8-sandbox, llm-gateway, rag-core)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install test deps
+        run: pip install pytest blake3 cryptography grpcio-tools
+      - name: t8-sandbox tests (incl. kernel SECCOMP)
+        working-directory: submodules/t8-sandbox
+        env:
+          PYTHONPATH: .:seccomp
+        run: python -m pytest -q tests
+      - name: llm-gateway tests
+        working-directory: submodules/llm-gateway
+        env:
+          PYTHONPATH: .
+        run: python -m pytest -q tests
+      - name: rag-core tests (incl. AC-06)
+        working-directory: submodules/rag-core
+        env:
+          PYTHONPATH: .
+        run: python -m pytest -q tests
+
+  # ---------------------------------------------------------------------------
+  proto:
+    name: gRPC контракты (api/proto)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install grpcio-tools
+      - name: Compile proto → Python stubs
+        run: |
+          mkdir -p api/gen/python
+          python -m grpc_tools.protoc --proto_path=api/proto \
+            --python_out=api/gen/python --grpc_python_out=api/gen/python \
+            api/proto/*.proto
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: "25.x"
+      - name: Descriptor set (C++ protoc)
+        run: protoc --proto_path=api/proto -o /tmp/proto.desc api/proto/*.proto
+
+  # ---------------------------------------------------------------------------
+  seccomp:
+    name: SECCOMP policy verification (Приложение В)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install blake3
+      - name: Compile + simulate policy (x86_64, aarch64)
+        run: ./scripts/build-sec-profile.sh
+
+  # ---------------------------------------------------------------------------
+  shell:
+    name: Shellcheck + eBPF
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Shellcheck
+        run: |
+          shellcheck -x scripts/*.sh \
+            submodules/t8-sandbox/bwrap/run.sh \
+            submodules/t8-sandbox/ebpf/build.sh \
+            submodules/llm-gateway/certs/issue_short_lived.sh
+      - name: Install clang
+        run: sudo apt-get update && sudo apt-get install -y clang linux-libc-dev
+      - name: eBPF object build (clang -target bpf -Werror)
+        run: ./submodules/t8-sandbox/ebpf/build.sh --check
+
+  # ---------------------------------------------------------------------------
+  fuzz:
+    name: Fuzzing контрактов (этап 7 ТЗ)
+    runs-on: ubuntu-22.04
+    needs: [rust, python]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: dtolnay/rust-toolchain@stable
+      - run: pip install pytest blake3 cryptography
+      - name: Build Rust debug binaries
+        run: |
+          (cd submodules/worm-audit && cargo build)
+          (cd submodules/fsm-engine && cargo build)
+      - name: Fuzz campaign (10k итераций)
+        run: python3 tests/fuzz/run_fuzz.py --iterations 10000 --seed $RANDOM

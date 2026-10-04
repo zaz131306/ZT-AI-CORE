@@ -1,0 +1,237 @@
+// ============================================================================
+// ZT-AI-CORE v2.4 — контракт FSM-движка (L6)
+// Lifecycle × Operating Modes (Приложение А), WAL-атомарность (F-F-05),
+// Pending Rollback Counter (F-F-03), A/B-обновления (F-I-02/03).
+// ============================================================================
+syntax = "proto3";
+
+package zt.fsm.v2;
+
+option go_package = "github.com/zt-ai-core/api/gen/go/fsm/v2;fsmv2";
+
+// ----------------------------------------------------------------------------
+// Пространство состояний (F-F-01, F-F-02)
+// ----------------------------------------------------------------------------
+
+enum LifecycleState {
+  LIFECYCLE_STATE_UNSPECIFIED = 0;
+  LIFECYCLE_STATE_BOOT = 1;
+  LIFECYCLE_STATE_BOOT_FAILSAFE = 2;
+  LIFECYCLE_STATE_SELF_TEST = 3;
+  LIFECYCLE_STATE_RUNNING = 4;
+  LIFECYCLE_STATE_DEGRADED = 5;
+  LIFECYCLE_STATE_SHUTDOWN = 6;
+}
+
+enum OperatingMode {
+  OPERATING_MODE_UNSPECIFIED = 0;
+  OPERATING_MODE_NOMINAL = 1;
+  OPERATING_MODE_ISOLATED = 2;
+  OPERATING_MODE_RECOVERY = 3;
+}
+
+// Триггеры переходов (см. docs/05-fsm-matrix.md §8).
+enum TransitionTrigger {
+  TRIGGER_UNSPECIFIED = 0;
+  TRIGGER_OPERATOR = 1;                  // ручная команда оператора
+  TRIGGER_BOOT_OK = 2;
+  TRIGGER_INTEGRITY_FAIL = 3;            // IMA/SBOM mismatch -> BOOT_FAILSAFE (AC-05)
+  TRIGGER_SELF_TEST_PASS = 4;
+  TRIGGER_SELF_TEST_FAIL = 5;
+  TRIGGER_WORM_TRUNCATION = 6;           // seq_local < seq_TPM|seq_ext (AC-03)
+  TRIGGER_WAL_INCOMPLETE = 7;            // intent без commit при старте (AC-04)
+  TRIGGER_EXT_ANCHOR_DOWN = 8;           // S3 недоступен > 5 мин -> DEGRADED
+  TRIGGER_TPM_WEAR_HIGH = 9;             // износ NV >= 80% -> DEGRADED
+  TRIGGER_GATEWAY_DOWN = 10;             // LLM Gateway не отвечает > 30 с
+  TRIGGER_WATCHDOG_TIMEOUT = 11;         // нет подтверждения > 500 мс (NF-05)
+  TRIGGER_THERMAL = 12;                  // T_j > порога (docs/09-hal-thermal.md)
+  TRIGGER_SHUTDOWN_REQUESTED = 13;
+}
+
+// ----------------------------------------------------------------------------
+// Сообщения
+// ----------------------------------------------------------------------------
+
+message FsmStateSnapshot {
+  LifecycleState lifecycle = 1;
+  OperatingMode mode = 2;
+  uint64 epoch = 3;                      // инкрементируется на каждом переходе
+  uint64 wal_sequence = 4;               // seq последней commit-записи WAL
+  int64 timestamp_unix_ns = 5;
+  string reason = 6;                     // человекочитаемая причина текущего состояния
+  TransitionTrigger last_trigger = 7;
+  bool write_locked = 8;                 // true при TRUNCATION (блокировка записи WORM)
+}
+
+message GetStateRequest {}
+
+message TransitionRequest {
+  LifecycleState target_lifecycle = 1;
+  OperatingMode target_mode = 2;
+  TransitionTrigger trigger = 3;
+  string reason = 4;
+  string requester_id = 5;               // идентификатор оператора/компонента
+  bytes nonce = 6;                       // anti-replay операторской команды
+}
+
+message TransitionResponse {
+  bool accepted = 1;
+  FsmStateSnapshot state = 2;            // состояние ПОСЛЕ применения (или текущее)
+  string rejection_reason = 3;           // напр. "matrix violation: BOOT x ISOLATED"
+  bool matrix_violation = 4;             // комбинация недопустима по Приложению А
+  uint64 wal_intent_seq = 5;             // seq intent-записи (для форензики)
+}
+
+message StateEvent {
+  FsmStateSnapshot previous = 1;
+  FsmStateSnapshot current = 2;
+  TransitionTrigger trigger = 3;
+  string reason = 4;
+  int64 timestamp_unix_ns = 5;
+  uint64 duration_ms = 6;                // длительность перехода (NF-05: <= 500 мс)
+}
+
+message WatchEventsRequest {
+  bool replay_last = 1;                  // дослать последние N событий при подключении
+  uint32 replay_count = 2;
+}
+
+// --- Self-test (F-F-01: BOOT/RECOVERY -> SELF_TEST -> RUNNING) --------------
+
+message SelfTestItem {
+  string name = 1;                       // напр. "worm_chain_verify", "seccomp_profile_hash"
+  bool passed = 2;
+  string detail = 3;
+  uint64 duration_ms = 4;
+}
+
+message RunSelfTestRequest {
+  bool full = 1;                         // true — расширенный набор (после RECOVERY)
+  uint64 deadline_ms = 2;                // NF-05: полная стабилизация <= 5 с
+}
+
+message SelfTestReport {
+  bool passed = 2;
+  repeated SelfTestItem items = 1;
+  uint64 total_duration_ms = 3;
+  int64 timestamp_unix_ns = 4;
+}
+
+// --- A/B-обновления и Pending Rollback Counter (F-F-03, F-I-02/03) ----------
+
+enum UpdateSlot {
+  UPDATE_SLOT_UNSPECIFIED = 0;
+  UPDATE_SLOT_A = 1;
+  UPDATE_SLOT_B = 2;
+}
+
+message RollbackStatus {
+  uint32 pending_rollback_counter = 1;   // >0 между stage и вердиктом SELF_TEST
+  bool rollback_allowed = 2;             // инвариант: запрещён до успешного SELF_TEST
+  UpdateSlot active_slot = 3;
+  UpdateSlot staged_slot = 4;
+  uint64 version_number_active = 5;      // монотонный (anti-downgrade, TPM NV)
+  uint64 version_number_staged = 6;
+  string reason = 7;
+}
+
+message StageUpdateRequest {
+  UpdateSlot target_slot = 1;            // MUST B (F-I-03)
+  uint64 version_number = 2;             // MUST > version_number_active (F-I-02)
+  bytes artifact_blake3 = 3;
+  bytes ed25519_signature = 4;           // offline-ключ HSM (F-I-01)
+  bytes signer_public_key = 5;
+  bytes sbom_blake3 = 6;                 // CycloneDX/SPDX (F-I-04)
+}
+
+message StageUpdateResponse {
+  bool accepted = 1;
+  string rejection_reason = 2;           // signature/version/slot violation
+  RollbackStatus rollback = 3;
+}
+
+message CommitUpdateRequest {
+  bytes operator_nonce = 1;              // commit только после SELF_TEST pass
+  string operator_id = 2;
+}
+
+message CommitUpdateResponse {
+  bool committed = 1;
+  RollbackStatus rollback = 2;
+}
+
+message RollbackRequest {
+  string reason = 1;                     // напр. "SELF_TEST failed in slot B"
+  bytes operator_nonce = 2;
+}
+
+message RollbackResponse {
+  bool rolled_back = 1;
+  string rejection_reason = 2;           // "rollback forbidden: SELF_TEST pending"
+  RollbackStatus rollback = 3;
+}
+
+message GetRollbackStatusRequest {}
+
+// --- Форензика (runbook §2: zt-core-cli dump-state) --------------------------
+
+message DumpStateRequest {}
+
+message DumpStateResponse {
+  string json_dump = 1;                  // полное состояние: snapshot + WAL-хвост + rollback
+  bytes dump_blake3 = 2;
+  int64 timestamp_unix_ns = 3;
+}
+
+// Записи WAL (F-F-05) — контракт формата для внешнего аудита.
+enum WalRecordType {
+  WAL_RECORD_UNSPECIFIED = 0;
+  WAL_RECORD_INTENT = 1;                 // intent-to-transition (до применения)
+  WAL_RECORD_COMMIT = 2;                 // переход завершён + watchdog ack
+  WAL_RECORD_ROLLBACK_STAGE = 3;
+  WAL_RECORD_ROLLBACK_COMMIT = 4;
+  WAL_RECORD_SELF_TEST = 5;
+}
+
+message WalRecord {
+  uint64 seq = 1;
+  WalRecordType record_type = 2;
+  LifecycleState from_lifecycle = 3;
+  LifecycleState to_lifecycle = 4;
+  OperatingMode from_mode = 5;
+  OperatingMode to_mode = 6;
+  uint64 epoch = 7;
+  int64 timestamp_unix_ns = 8;
+  bytes blake3_checksum = 9;             // целостность записи WAL
+  bool fsync_confirmed = 10;             // гарантированный fsync (F-F-05)
+  bool watchdog_ack = 11;                // переход завершён только с ack watchdog
+}
+
+message GetWalTailRequest {
+  uint32 max_records = 1;
+}
+
+message GetWalTailResponse {
+  repeated WalRecord records = 1;
+  bool incomplete_intent_found = 2;      // true => следующий старт в RECOVERY (AC-04)
+}
+
+// ----------------------------------------------------------------------------
+// Сервис FSM-движка
+// ----------------------------------------------------------------------------
+service FsmService {
+  rpc GetState(GetStateRequest) returns (FsmStateSnapshot);
+  rpc RequestTransition(TransitionRequest) returns (TransitionResponse);
+  rpc WatchEvents(WatchEventsRequest) returns (stream StateEvent);
+  rpc RunSelfTest(RunSelfTestRequest) returns (SelfTestReport);
+
+  // A/B-обновления (F-I-03): stage -> reboot B -> SELF_TEST -> commit | rollback
+  rpc StageUpdate(StageUpdateRequest) returns (StageUpdateResponse);
+  rpc CommitUpdate(CommitUpdateRequest) returns (CommitUpdateResponse);
+  rpc Rollback(RollbackRequest) returns (RollbackResponse);
+  rpc GetRollbackStatus(GetRollbackStatusRequest) returns (RollbackStatus);
+
+  // Форензика и аудит WAL
+  rpc DumpState(DumpStateRequest) returns (DumpStateResponse);
+  rpc GetWalTail(GetWalTailRequest) returns (GetWalTailResponse);
+}

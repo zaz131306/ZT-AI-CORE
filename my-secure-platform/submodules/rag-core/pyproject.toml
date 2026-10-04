@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zt-rag-core"
+version = "2.4.0"
+description = "ZT-AI-CORE L8/D8 RAG-ядро: ingestion, KB, гибридный retriever, каскадный валидатор (F-A…F-D)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "blake3>=0.4",
+    "cryptography>=42",
+]
+prod = [
+    # Eager Loading в bootstrap (F-E-07) — НЕ lazy:
+    "blake3>=0.4",
+    "cryptography>=42",
+    "sentence-transformers>=2.7",   # BGE-M3 / e5-small / CrossEncoder
+    "chromadb>=0.5",                # альтернатива InMemoryVectorStore
+]
+
+[tool.setuptools.packages.find]
+include = ["rag_core*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
