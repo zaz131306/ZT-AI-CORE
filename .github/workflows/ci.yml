@@ -65,9 +65,13 @@ jobs:
         run: python -m pytest -q tests
       - name: llm-gateway tests
         working-directory: my-secure-platform/submodules/llm-gateway
+        env:
+          PYTHONPATH: .
         run: python -m pytest -q tests
-      - name: rag-core tests
+      - name: rag-core tests (incl. AC-06)
         working-directory: my-secure-platform/submodules/rag-core
+        env:
+          PYTHONPATH: .
         run: python -m pytest -q tests
 
   # ---------------------------------------------------------------------------
