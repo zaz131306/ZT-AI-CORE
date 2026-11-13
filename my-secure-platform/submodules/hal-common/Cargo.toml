@@ -5,7 +5,7 @@ edition = "2021"
 rust-version = "1.75"
 description = "ZT-AI-CORE HAL: крипто-профиль (L3), тепловой/энергетический бюджет (L0-L2), платформенные проверки, операции TPM 2.0"
 license = "Apache-2.0"
-repository = "https://github.com/zt-ai-core/my-secure-platform"
+repository = "https://github.com/zaz131306/ZT-AI-CORE"
 
 [dependencies]
 blake3 = "1"
