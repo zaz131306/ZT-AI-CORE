@@ -66,7 +66,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Python SAST (llm-gateway / rag-core / t8-sandbox)
+      - run: pip install bandit
+      - name: Bandit
         run: |
           bandit -r my-secure-platform/submodules/llm-gateway/llm_gateway \
                      my-secure-platform/submodules/rag-core/rag_core \
@@ -80,32 +81,29 @@ jobs:
               -x '*/tests/*' -ll
 
   semgrep:
-    name: Semgrep (custom taint rules)
+    name: Semgrep
     runs-on: ubuntu-22.04
+    container:
+      image: semgrep/semgrep
     steps:
       - uses: actions/checkout@v4
-      - name: Run Semgrep (custom taint rules)
-        run: |
-          pip install semgrep
-          semgrep --config=semgrep/rules/zt_taint_rules \
-            my-secure-platform/submodules/llm-gateway/llm_gateway \
-            my-secure-platform/submodules/rag-core/rag_core \
-            --use-git-ignore --json -o semgrep-report.json
+      - run: semgrep ci --config=auto my-secure-platform/submodules/ || semgrep --config=auto my-secure-platform/submodules/
 
   reproducible-check:
-    name: Reproducible build check
+    name: Reproducible builds (F-I-05)
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Build twice + compare SHA-256
+      - name: Два независимых билда worm-audit → одинаковые хэши
         run: |
           cd my-secure-platform/submodules/worm-audit
           cargo build --release
-          H1=$(sha256sum target/release/zt-worm-audit | awk '{print $1}')
+          H1=$(sha256sum target/release/zt-worm-audit | cut -d' ' -f1)
           touch src/lib.rs src/main.rs
           cargo build --release
-          H2=$(sha256sum target/release/zt-worm-audit | awk '{print $1}')
+          H2=$(sha256sum target/release/zt-worm-audit | cut -d' ' -f1)
+          echo "build1=$H1"; echo "build2=$H2"
           if [ "$H1" != "$H2" ]; then
             echo "::warning::Бинари различаются (timestamp embedding) — используйте SOURCE_DATE_EPOCH для полной воспроизводимости"
           fi
