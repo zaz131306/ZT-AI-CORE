@@ -135,10 +135,10 @@
       ]
     },
     {
-      "comment": "Whitelist, группа 1: базовые операции с памятью и файлами. newfstatat/statx включены, потому что glibc >= 2.33 (F-E-08 требует именно glibc) реализует fstat()/stat() через statx с fallback newfstatat — без них группа 'fstat' из Приложения В неработоспособна на современном ABI. Это read-only метаданные: новой поверхности атаки относительно уже разрешённого openat не добавляют.",
+      "comment": "Whitelist, группа 1: базовые операции с памятью и файлами. newfstatat/statx включены, потому что glibc >= 2.33 (F-E-08 требует именно glibc) реализует fstat()/stat() через statx с fallback newfstatat — без них группа 'fstat' из Приложения В неработоспособна на современном ABI. Это read-only метаданные: новой поверхности атаки относительно уже разрешённого openat не добавляют. mremap — glibc realloc больших буферов (>mmap_threshold) сжимает их через mremap (доказано strace: SIGSYS на mremap при sha256 интерпретатора в INTEGRITY); защит не меняет (prot-аргумента у mremap нет), поэтому PROT_EXEC-условие как у mmap/mprotect не нужно.",
       "names": [
         "read", "write", "openat", "close", "fstat", "newfstatat", "statx",
-        "mmap", "mprotect", "munmap", "brk", "pread64", "pwrite64", "lseek",
+        "mmap", "mprotect", "munmap", "mremap", "brk", "pread64", "pwrite64", "lseek",
         "dup", "dup2", "dup3", "pipe2", "getdents64"
       ],
       "action": "SCMP_ACT_ALLOW"
