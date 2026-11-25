@@ -140,12 +140,32 @@ impl ExternalAnchor for DirectoryAnchor {
             return Err(AnchorError::Unavailable("external anchor offline (S3 503)".into()));
         }
         let path = self.cp_path(cp.last_seq);
+        let bytes = serde_json::to_vec_pretty(cp).unwrap();
+        if path.exists() {
+            // Object Lock: объект уже опубликован и неизменяем.
+            // Повторная публикация того же состояния цепочки (тот же
+            // last_seq и chain_head — авто-публикация при append и следом
+            // force-публикация, или слив буфера) — идемпотентный успех:
+            // заякоренный чекпоинт остаётся каноническим.
+            // Другое состояние под тем же seq — конфликт, молча не принимаем.
+            let existing: Checkpoint = serde_json::from_slice(&std::fs::read(&path)?)
+                .map_err(|e| {
+                    AnchorError::Unavailable(format!("повреждённый объект якоря {path:?}: {e}"))
+                })?;
+            if existing.last_seq == cp.last_seq && existing.chain_head == cp.chain_head {
+                return Ok(());
+            }
+            return Err(AnchorError::Unavailable(format!(
+                "checkpoint {} уже заякорен с другим состоянием цепочки",
+                cp.last_seq
+            )));
+        }
         let mut file = OpenOptions::new()
             .create(true)
             .write(true)
             .truncate(true)
             .open(&path)?;
-        file.write_all(serde_json::to_vec_pretty(cp).unwrap().as_slice())?;
+        file.write_all(bytes.as_slice())?;
         file.sync_all()?;
         drop(file);
         // Object Lock (Compliance mode): объект становится неизменяемым.
