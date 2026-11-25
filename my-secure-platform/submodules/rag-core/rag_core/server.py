@@ -148,7 +148,7 @@ class RagServer:
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         listener.bind(path)
         listener.listen(16)
-        os.chmod(path, 0o660)
+        os.chmod(path, 0o660)  # nosec B103: намеренно, сокет для сервисов той же группы
         self._listener = listener
         print(f"[rag-core] serving on {path}", file=sys.stderr, flush=True)
         while not self._stop.is_set():

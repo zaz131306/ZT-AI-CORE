@@ -19,6 +19,7 @@ import re
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import urlparse
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -79,6 +80,8 @@ class HttpLlmClient:
                  client_cert: Optional[tuple[str, str]] = None,
                  ca_bundle: Optional[str] = None, model: str = "qwen2.5-14b"):
         self.base_url = base_url.rstrip("/")
+        if urlparse(self.base_url).scheme not in ("http", "https"):
+            raise ValueError(f"LLM base_url должен быть http(s): {base_url!r}")
         self.timeout = timeout
         self.client_cert = client_cert
         self.ca_bundle = ca_bundle
@@ -104,7 +107,7 @@ class HttpLlmClient:
             f"{self.base_url}/v1/chat/completions", data=data,
             headers={"Content-Type": "application/json"}, method="POST")
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout,
+            with urllib.request.urlopen(req, timeout=self.timeout,  # nosec B310: схема base_url проверена в __init__ (только http/https)
                                         context=self._ssl_context()) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
         except (urllib.error.URLError, TimeoutError, OSError) as exc:

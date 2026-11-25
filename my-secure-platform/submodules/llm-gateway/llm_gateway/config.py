@@ -41,7 +41,7 @@ def _env_list(name: str, default: List[str] | None = None) -> List[str]:
 @dataclass
 class GatewayConfig:
     # --- сеть -----------------------------------------------------------------
-    listen: str = "0.0.0.0"
+    listen: str = "0.0.0.0"  # nosec B104: намеренно, внешний интерфейс; доступ только по mTLS
     port: int = 8443
 
     # --- mTLS (F-D-04: TTL <= 5 мин) -------------------------------------------
