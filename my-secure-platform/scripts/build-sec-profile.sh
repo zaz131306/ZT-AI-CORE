@@ -33,6 +33,9 @@ done
 
 echo
 echo "== Верификация политики симулятором cBPF (offline) =="
+# heredoc ниже использует относительные пути submodules/... — они
+# считаются от my-secure-platform, а CI запускает скрипт из корня репо
+cd "${ROOT}"
 "${PYTHON}" - <<'PYEOF'
 import sys
 from pathlib import Path
