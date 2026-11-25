@@ -758,7 +758,7 @@ mod tests {
         // удаляем СЕРЕДИНУ (не хвост) — seq gap + hash mismatch
         let lines: Vec<String> =
             std::fs::read_to_string(&path).unwrap().lines().map(String::from).collect();
-        let reduced = vec![lines[0].clone(), lines[2].clone()];
+        let reduced = [lines[0].clone(), lines[2].clone()];
         std::fs::write(&path, reduced.join("\n") + "\n").unwrap();
         let report = verify_chain(&path, true, false, None, 0, 0);
         assert!(!report.valid);

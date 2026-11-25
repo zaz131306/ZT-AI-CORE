@@ -192,7 +192,7 @@ fn decode_payload(params: &Value) -> Result<Vec<u8>, String> {
         return base64_decode(b64);
     }
     if let Some(raw) = params.get("payload") {
-        return Ok(serde_json::to_vec(raw).map_err(|e| e.to_string())?);
+        return serde_json::to_vec(raw).map_err(|e| e.to_string());
     }
     Err("payload_b64 or payload required".into())
 }

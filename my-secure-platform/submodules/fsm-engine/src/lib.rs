@@ -4,9 +4,9 @@
 //! * [`state`]    — Lifecycle × Operating Modes, матрица Приложения А;
 //! * [`wal`]      — Write-Ahead Log атомарных переходов (F-F-05, AC-04);
 //! * [`rollback`] — Pending Rollback Counter (F-F-03), A/B-слоты (F-I-03),
-//!                    anti-downgrade (F-I-02), подпись артефактов (F-I-01);
+//!   anti-downgrade (F-I-02), подпись артефактов (F-I-01);
 //! * [`engine`]   — движок: переходы, watchdog (NF-05), SELF_TEST,
-//!                    реакция на события WORM (F-G-04), форензика;
+//!   реакция на события WORM (F-G-04), форензика;
 //! * [`server`]   — UDS-сервер контракта fsm.proto (line-oriented JSON);
 //! * [`audit`]    — клиент WORM-шины (публикация FSM_EVENT).
 

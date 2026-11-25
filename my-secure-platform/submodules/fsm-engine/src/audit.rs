@@ -66,10 +66,7 @@ impl AuditClient {
         stream.write_all(line.as_bytes())?;
         stream.write_all(b"\n")?;
         stream.flush()?;
-        let mut reader = BufReader::new(match stream.try_clone() {
-            Ok(s) => s,
-            Err(e) => return Err(e),
-        });
+        let mut reader = BufReader::new(stream.try_clone()?);
         let mut resp = String::new();
         if reader.read_line(&mut resp)? == 0 {
             return Err(std::io::Error::new(
@@ -81,7 +78,7 @@ impl AuditClient {
             std::io::Error::new(std::io::ErrorKind::InvalidData, e)
         })?;
         if let Some(err) = value.get("error").and_then(|e| e.as_str()) {
-            return Err(std::io::Error::new(std::io::ErrorKind::Other, err.to_string()));
+            return Err(std::io::Error::other(err.to_string()));
         }
         Ok(value
             .pointer("/result/seq")
@@ -96,7 +93,7 @@ pub mod base64_lite {
         b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
     pub fn encode(data: &[u8]) -> String {
-        let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+        let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
         for chunk in data.chunks(3) {
             let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
             let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);

@@ -284,20 +284,21 @@ impl<T: TpmOps, E: ExternalAnchor> AuditService<T, E> {
     }
 
     pub fn anchor_status(&mut self) -> AnchorStatus {
-        let mut status = AnchorStatus::default();
-        status.seq_tpm = self.tpm_anchor.latest_seq().unwrap_or(0);
-        status.tpm_available = self.tpm_anchor.available();
-        status.tpm_nv_wear_percent = self.tpm_anchor.wear_percent().unwrap_or(0.0);
-        status.seq_ext = self.ext_anchor.latest_seq().unwrap_or(0);
-        status.ext_available = self.ext_anchor.available();
-        status.buffered_checkpoints = self.buffer.len();
-        status.tpm_last_write_unix_ns = self
-            .tpm_anchor
-            .last_write()
-            .and_then(|t| t.checked_add(Duration::ZERO))
-            .map(|_| crate::record::now_unix_ns())
-            .unwrap_or(0);
-        status
+        AnchorStatus {
+            seq_tpm: self.tpm_anchor.latest_seq().unwrap_or(0),
+            tpm_available: self.tpm_anchor.available(),
+            tpm_nv_wear_percent: self.tpm_anchor.wear_percent().unwrap_or(0.0),
+            seq_ext: self.ext_anchor.latest_seq().unwrap_or(0),
+            ext_available: self.ext_anchor.available(),
+            buffered_checkpoints: self.buffer.len(),
+            tpm_last_write_unix_ns: self
+                .tpm_anchor
+                .last_write()
+                .and_then(|t| t.checked_add(Duration::ZERO))
+                .map(|_| crate::record::now_unix_ns())
+                .unwrap_or(0),
+            ..Default::default()
+        }
     }
 
     pub fn stats(&self) -> ChainStats {
@@ -435,7 +436,6 @@ mod tests {
             },
             tpm_nv_index: 0x1500001,
             tpm_min_interval: Duration::ZERO,
-            ..Default::default()
         }
     }
 

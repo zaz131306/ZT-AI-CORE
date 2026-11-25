@@ -96,15 +96,17 @@ impl std::fmt::Display for OperatingMode {
 pub fn matrix_allowed(lifecycle: LifecycleState, mode: OperatingMode) -> bool {
     use LifecycleState as L;
     use OperatingMode as M;
-    match (lifecycle, mode) {
-        (L::Boot, M::Nominal) => true,
-        (L::BootFailsafe, M::Recovery) => true,
-        (L::SelfTest, M::Nominal) | (L::SelfTest, M::Isolated) => true,
-        (L::Running, _) => true,
-        (L::Degraded, M::Isolated) | (L::Degraded, M::Recovery) => true,
-        (L::Shutdown, _) => true,
-        _ => false,
-    }
+    matches!(
+        (lifecycle, mode),
+        (L::Boot, M::Nominal)
+            | (L::BootFailsafe, M::Recovery)
+            | (L::SelfTest, M::Nominal)
+            | (L::SelfTest, M::Isolated)
+            | (L::Running, _)
+            | (L::Degraded, M::Isolated)
+            | (L::Degraded, M::Recovery)
+            | (L::Shutdown, _)
+    )
 }
 
 /// Допустимые рёбра графа lifecycle (docs/05-fsm-matrix.md §3).

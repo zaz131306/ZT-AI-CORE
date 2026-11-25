@@ -3,12 +3,12 @@
 //!
 //! * [`record`]     — запись, BLAKE3 hash-chain (F-G-01/02, Приложение Б п.3);
 //! * [`chain`]      — append-only писатель, anti-replay nonce+TTL (F-G-03),
-//!                      sync-политики (NF-03), верификация;
+//!   sync-политики (NF-03), верификация;
 //! * [`checkpoint`] — чекпоинты: ≥1000 записей ИЛИ ≥60 с, Ed25519-подпись;
 //! * [`anchors`]    — dual-anchor: TPM NV-Counter (≤1/час, износ) + внешний
-//!                      WORM (S3 Object Lock), локальный буфер (F-G-04/05);
+//!   WORM (S3 Object Lock), локальный буфер (F-G-04/05);
 //! * [`reconcile`]  — сверка при старте, TRUNCATION → RECOVERY + блокировка
-//!                      записи (AC-03);
+//!   записи (AC-03);
 //! * [`service`]    — сборка: цепочка + планировщик чекпоинтов + якоря;
 //! * [`server`]     — UDS-сервер контракта audit.proto.
 
