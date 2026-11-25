@@ -598,6 +598,9 @@ mod tests {
 
     #[test]
     fn uds_roundtrip_call_once() {
+        // Сервер по умолчанию пускает только root (ZT_IPC_ALLOWED_UIDS=0),
+        // а тесты в CI идут от uid 1001 — разрешаем свой uid на время теста.
+        std::env::set_var("ZT_IPC_ALLOWED_UIDS", unsafe { libc::getuid() }.to_string());
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("fsm.sock");
         let c = ServerContext::new(dir.path().join("wal.log"), EngineConfig::default(), None).unwrap();
